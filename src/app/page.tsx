@@ -21,7 +21,7 @@ type InspectMeta = {
 
 const LOCKED_VALUES = {
   id: "20428",
-  fullname: "นายอธิป เชิดศร",
+  fullname: "นายอธิป เชิดศรี",
   nickname: "ออมสิน",
 };
 
