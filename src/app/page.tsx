@@ -35,13 +35,52 @@ type Identity = {
 const isShortInput = (f: Field) =>
   f.type === "text" || f.type === "textarea" || !f.type || f.type === "hidden";
 
-function pickIdentityFieldsByIndex(fields: Field[]) {
-  const shortInputs = fields.filter(isShortInput);
-  return {
-    id: shortInputs[0],
-    fullname: shortInputs[1],
-    nickname: shortInputs[2],
-  } as { id?: Field; fullname?: Field; nickname?: Field };
+function pickIdentityFieldsByLabel(fields: Field[]) {
+  const norm = (s: string) =>
+    (s || "")
+      .toLowerCase()
+      .replace(/[()\[\]{}]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const isId = (lbl: string) =>
+    /(id|เลข\s*ประจำตัว|รหัส\s*นักศึกษา|student\s*id)/i.test(lbl);
+  const isFullname = (lbl: string) =>
+    /(ชื่อ[-\s]?นามสกุล|fullname|full\s*name)/i.test(lbl);
+  const isNickname = (lbl: string) => /(ชื่อเล่น|nickname)/i.test(lbl);
+
+  let id: Field | undefined;
+  let fullname: Field | undefined;
+  let nickname: Field | undefined;
+
+  for (const f of fields) {
+    const lbl = norm(f.label || "");
+    if (!id && isId(lbl)) {
+      id = f;
+      continue;
+    }
+    if (!fullname && isFullname(lbl)) {
+      fullname = f;
+      continue;
+    }
+    if (!nickname && isNickname(lbl)) {
+      nickname = f;
+      continue;
+    }
+  }
+
+  if (!id || !fullname || !nickname) {
+    const shortInputs = fields.filter(isShortInput);
+    id ??= shortInputs[0];
+    fullname ??= shortInputs[1];
+    nickname ??= shortInputs[2];
+  }
+
+  return { id, fullname, nickname } as {
+    id?: Field;
+    fullname?: Field;
+    nickname?: Field;
+  };
 }
 
 function normalizeLabel(raw: string): string {
@@ -68,6 +107,12 @@ export default function Home() {
   const [inputFullname, setInputFullname] = useState("");
   const [inputNickname, setInputNickname] = useState("");
 
+  const [manualMap, setManualMap] = useState<{
+    id?: string;
+    fullname?: string;
+    nickname?: string;
+  }>({});
+
   useEffect(() => {
     setIdentities([
       {
@@ -84,6 +129,8 @@ export default function Home() {
 
   const load = useCallback(async () => {
     setStatus("");
+    setMeta(null);
+    setManualMap({});
     const { data } = await AX.get<InspectMeta>("/api/forms/inspect", {
       params: { url },
     });
@@ -95,22 +142,25 @@ export default function Home() {
   }, [url, AX]);
 
   const chosenFields = useMemo(
-    () => (meta ? pickIdentityFieldsByIndex(meta.fields) : {}),
+    () => (meta ? pickIdentityFieldsByLabel(meta.fields) : {}),
     [meta]
   );
 
   const identityNames = useMemo(() => {
-    const s = new Set<string>();
+    const sset = new Set<string>();
     const c = chosenFields as {
       id?: Field;
       fullname?: Field;
       nickname?: Field;
     };
-    if (c.id?.name) s.add(c.id.name);
-    if (c.fullname?.name) s.add(c.fullname.name);
-    if (c.nickname?.name) s.add(c.nickname.name);
-    return s;
-  }, [chosenFields]);
+    if (c.id?.name) sset.add(c.id.name);
+    if (c.fullname?.name) sset.add(c.fullname.name);
+    if (c.nickname?.name) sset.add(c.nickname.name);
+    if (manualMap.id) sset.add(manualMap.id);
+    if (manualMap.fullname) sset.add(manualMap.fullname);
+    if (manualMap.nickname) sset.add(manualMap.nickname);
+    return sset;
+  }, [chosenFields, manualMap]);
 
   const onChange = (name: string, v: any) =>
     setValues((st) => ({ ...st, [name]: v }));
@@ -159,20 +209,22 @@ export default function Home() {
       const forceValues = { ...values };
 
       const selected = getSelectedIdentity();
-      const c = chosenFields as {
-        id?: Field;
-        fullname?: Field;
-        nickname?: Field;
-      };
+
+      const idName =
+        manualMap.id || (chosenFields as any).id?.name || undefined;
+      const fullnameName =
+        manualMap.fullname || (chosenFields as any).fullname?.name || undefined;
+      const nicknameName =
+        manualMap.nickname || (chosenFields as any).nickname?.name || undefined;
 
       if (selected) {
-        if (c.id) forceValues[c.id.name] = selected.id;
-        if (c.fullname) forceValues[c.fullname.name] = selected.fullname;
-        if (c.nickname) forceValues[c.nickname.name] = selected.nickname;
+        if (idName) forceValues[idName] = selected.id;
+        if (fullnameName) forceValues[fullnameName] = selected.fullname;
+        if (nicknameName) forceValues[nicknameName] = selected.nickname;
       } else {
-        if (c.id) forceValues[c.id.name] = LOCKED_VALUES.id;
-        if (c.fullname) forceValues[c.fullname.name] = LOCKED_VALUES.fullname;
-        if (c.nickname) forceValues[c.nickname.name] = LOCKED_VALUES.nickname;
+        if (idName) forceValues[idName] = LOCKED_VALUES.id;
+        if (fullnameName) forceValues[fullnameName] = LOCKED_VALUES.fullname;
+        if (nicknameName) forceValues[nicknameName] = LOCKED_VALUES.nickname;
       }
 
       const missing: string[] = [];
@@ -183,8 +235,9 @@ export default function Home() {
           /workdate/.test(n);
         const looksPos =
           n.includes(normalizeLabel("ตำแหน่ง")) || /position/.test(n);
-        if ((looksDate || looksPos) && !forceValues[f.name])
+        if ((looksDate || looksPos) && !forceValues[f.name]) {
           missing.push(f.label);
+        }
       });
       if (missing.length) {
         setSubmitting(false);
@@ -208,7 +261,12 @@ export default function Home() {
     } finally {
       setSubmitting(false);
     }
-  }, [meta, url, values, chosenFields, AX, identities, selectedKey]);
+  }, [meta, url, values, chosenFields, AX, identities, selectedKey, manualMap]);
+
+  const shortEntryFields = useMemo(
+    () => (meta ? meta.fields.filter(isShortInput) : []),
+    [meta]
+  );
 
   return (
     <main className={styles.container}>
@@ -320,100 +378,194 @@ export default function Home() {
         </ol>
       </div>
 
+      {/* เมื่อโหลดฟอร์มแล้ว */}
       {meta && (
-        <div className={styles.card}>
-          {meta.fields.map((f, i) => {
-            const isIdentity = identityNames.has(f.name);
-            if (isIdentity) return null;
-            if (f.type === "hidden") return null;
-
-            const labelEl = (
-              <div className={styles.fieldLabelWrap}>
-                <span className={styles.fieldLabel}>{f.label}</span>
-                {f.required ? <span className={styles.required}></span> : null}
+        <>
+          {/* --- NEW: Fallback Manual Mapping Section --- */}
+          <div className={styles.card}>
+            <div className={styles.sectionHeader}>
+              <div>
+                <div className={styles.sectionTitle}>
+                  จับคู่ช่อง ID/ชื่อ/ชื่อเล่น
+                </div>
+                <div className={styles.sectionSub}>
+                  ถ้าระบบจับอัตโนมัติไม่ตรง ให้เลือกชื่อช่องเอง
+                  (เลือกเฉพาะช่องสั้น)
+                </div>
               </div>
-            );
+            </div>
 
-            if (f.type === "select") {
-              return (
-                <div key={i} className={styles.field}>
-                  {labelEl}
-                  <select
-                    className={styles.select}
-                    value={values[f.name] ?? ""}
-                    onChange={(e) => onChange(f.name, e.target.value)}
-                  >
-                    <option value="">-- เลือก --</option>
-                    {f.options?.map((op, idx) => (
-                      <option key={idx} value={op.value}>
-                        {op.label}
-                      </option>
-                    ))}
-                  </select>
+            <div className={styles.identityGrid}>
+              <div className={styles.field}>
+                <div className={styles.fieldLabelWrap}>
+                  <span className={styles.fieldLabel}>ช่องสำหรับ ID</span>
+                </div>
+                <select
+                  className={styles.select}
+                  value={manualMap.id || ""}
+                  onChange={(e) =>
+                    setManualMap((m) => ({
+                      ...m,
+                      id: e.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">(อัตโนมัติ)</option>
+                  {shortEntryFields.map((f) => (
+                    <option key={f.name} value={f.name}>
+                      {f.label || f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className={styles.field}>
+                <div className={styles.fieldLabelWrap}>
+                  <span className={styles.fieldLabel}>
+                    ช่องสำหรับ ชื่อ-นามสกุล
+                  </span>
+                </div>
+                <select
+                  className={styles.select}
+                  value={manualMap.fullname || ""}
+                  onChange={(e) =>
+                    setManualMap((m) => ({
+                      ...m,
+                      fullname: e.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">(อัตโนมัติ)</option>
+                  {shortEntryFields.map((f) => (
+                    <option key={f.name} value={f.name}>
+                      {f.label || f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className={styles.field}>
+                <div className={styles.fieldLabelWrap}>
+                  <span className={styles.fieldLabel}>ช่องสำหรับ ชื่อเล่น</span>
+                </div>
+                <select
+                  className={styles.select}
+                  value={manualMap.nickname || ""}
+                  onChange={(e) =>
+                    setManualMap((m) => ({
+                      ...m,
+                      nickname: e.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">(อัตโนมัติ)</option>
+                  {shortEntryFields.map((f) => (
+                    <option key={f.name} value={f.name}>
+                      {f.label || f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+          {/* --- END Manual Mapping Section --- */}
+
+          <div className={styles.card}>
+            {meta.fields.map((f, i) => {
+              const isIdentity = identityNames.has(f.name);
+              if (isIdentity) return null;
+              if (f.type === "hidden") return null;
+
+              const labelEl = (
+                <div className={styles.fieldLabelWrap}>
+                  <span className={styles.fieldLabel}>{f.label}</span>
+                  {f.required ? (
+                    <span className={styles.required}></span>
+                  ) : null}
                 </div>
               );
-            }
 
-            if (f.type === "radio" && f.options?.length) {
-              return (
-                <div key={i} className={styles.field}>
-                  {labelEl}
-                  <div className={styles.radioGroup}>
-                    {f.options.map((op, idx) => (
-                      <label key={idx} className={styles.radioItem}>
-                        <input
-                          type="radio"
-                          name={f.name}
-                          value={op.value}
-                          checked={values[f.name] === op.value}
-                          onChange={() => onChange(f.name, op.value)}
-                        />
-                        {op.label}
-                      </label>
-                    ))}
+              if (f.type === "select") {
+                return (
+                  <div key={i} className={styles.field}>
+                    {labelEl}
+                    <select
+                      className={styles.select}
+                      value={values[f.name] ?? ""}
+                      onChange={(e) => onChange(f.name, e.target.value)}
+                    >
+                      <option value="">-- เลือก --</option>
+                      {f.options?.map((op, idx) => (
+                        <option key={idx} value={op.value}>
+                          {op.label}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                </div>
-              );
-            }
+                );
+              }
 
-            if (f.type === "textarea") {
+              if (f.type === "radio" && f.options?.length) {
+                return (
+                  <div key={i} className={styles.field}>
+                    {labelEl}
+                    <div className={styles.radioGroup}>
+                      {f.options.map((op, idx) => (
+                        <label key={idx} className={styles.radioItem}>
+                          <input
+                            type="radio"
+                            name={f.name}
+                            value={op.value}
+                            checked={values[f.name] === op.value}
+                            onChange={() => onChange(f.name, op.value)}
+                          />
+                          {op.label}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+
+              if (f.type === "textarea") {
+                return (
+                  <div key={i} className={styles.field}>
+                    {labelEl}
+                    <textarea
+                      className={styles.textarea}
+                      value={values[f.name] ?? ""}
+                      onChange={(e) => onChange(f.name, e.target.value)}
+                      rows={3}
+                    />
+                  </div>
+                );
+              }
+
               return (
                 <div key={i} className={styles.field}>
                   {labelEl}
-                  <textarea
-                    className={styles.textarea}
+                  <input
+                    className={styles.text}
+                    type="text"
                     value={values[f.name] ?? ""}
                     onChange={(e) => onChange(f.name, e.target.value)}
-                    rows={3}
                   />
                 </div>
               );
-            }
+            })}
 
-            return (
-              <div key={i} className={styles.field}>
-                {labelEl}
-                <input
-                  className={styles.text}
-                  type="text"
-                  value={values[f.name] ?? ""}
-                  onChange={(e) => onChange(f.name, e.target.value)}
-                />
-              </div>
-            );
-          })}
-
-          <div className={styles.actions}>
-            <button
-              className={styles.submit}
-              onClick={onSubmit}
-              disabled={submitting}
-            >
-              {submitting ? "กำลังส่ง…" : "Submit"}
-            </button>
-            {!!status && <div className={styles.status}>{status}</div>}
+            <div className={styles.actions}>
+              <button
+                className={styles.submit}
+                onClick={onSubmit}
+                disabled={submitting}
+              >
+                {submitting ? "กำลังส่ง…" : "Submit"}
+              </button>
+              {!!status && <div className={styles.status}>{status}</div>}
+            </div>
           </div>
-        </div>
+        </>
       )}
     </main>
   );

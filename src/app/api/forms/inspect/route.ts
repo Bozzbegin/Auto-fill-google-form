@@ -82,54 +82,73 @@ function extractFromDom($: cheerio.CheerioAPI): {
   });
 
   const fields: Field[] = [];
-  $form.find('[name^="entry."]').each((_, el) => {
-    const name = s($(el).attr("name"));
-    if (!name || name.endsWith("_sentinel")) return;
 
-    const typeAttr = s($(el).attr("type"));
-    const type =
-      typeAttr ||
-      ($(el).is("textarea")
-        ? "textarea"
-        : $(el).is("select")
-        ? "select"
-        : "text");
+  $form
+    .find(
+      'input[name^="entry."], textarea[name^="entry."], select[name^="entry."]'
+    )
+    .each((_, el) => {
+      const name = s($(el).attr("name"));
+      if (!name || name.endsWith("_sentinel")) return;
 
-    const required =
-      $(el).attr("aria-required") === "true" ||
-      ($(el).prop("required") as any) === true;
+      const typeAttr = s($(el).attr("type"));
+      const type =
+        typeAttr ||
+        ($(el).is("textarea")
+          ? "textarea"
+          : $(el).is("select")
+          ? "select"
+          : "text");
 
-    const label =
-      t(
+      const required =
+        $(el).attr("aria-required") === "true" ||
+        ($(el).prop("required") as any) === true;
+
+      const label =
+        t(
+          $(el)
+            .closest("[role='listitem']")
+            .find("div[role='heading']")
+            .first()
+            .text()
+        ) ||
+        t(
+          $(el)
+            .closest("div[aria-labelledby]")
+            .find("div[role='heading']")
+            .first()
+            .text()
+        ) ||
+        t($(el).closest("div").find("label").first().text()) ||
+        s($(el).attr("aria-label")) ||
+        s($(el).attr("placeholder")) || 
+        name;
+
+      if ($(el).is("select")) {
+        const opts: { value: string; label: string }[] = [];
         $(el)
-          .closest("[role='listitem']")
-          .find("div[role='heading']")
-          .first()
-          .text()
-      ) ||
-      t($(el).closest("div").find("label").first().text()) ||
-      s($(el).attr("aria-label")) ||
-      name;
-
-    if ($(el).is("select")) {
-      const opts: { value: string; label: string }[] = [];
-      $(el)
-        .find("option")
-        .each((_, op) => {
-          opts.push({ value: s($(op).attr("value")), label: t($(op).text()) });
-        });
-      fields.push({ name, type: "select", label, required, options: opts });
-    } else {
-      fields.push({ name, type, label, required });
-    }
-  });
+          .find("option")
+          .each((_, op) => {
+            const val = s($(op).attr("value"));
+            const lab = t($(op).text());
+            if (val || lab) {
+              opts.push({ value: val || lab, label: lab || val });
+            }
+          });
+        fields.push({ name, type: "select", label, required, options: opts });
+      } else {
+        fields.push({ name, type, label, required });
+      }
+    });
 
   $form.find('input[name^="entry."][name$="_sentinel"]').each((_, el) => {
     const sentinelName = s($(el).attr("name"));
     const base = sentinelName.replace(/_sentinel$/, "");
     const $item = $(el).closest("[role='listitem']");
     const qLabel =
-      t($item.find("div[role='heading']").first().text()) || sentinelName;
+      t($item.find("div[role='heading']").first().text()) ||
+      t($item.find("label").first().text()) ||
+      sentinelName;
 
     const req =
       $item.find('[role="radiogroup"]').attr("aria-required") === "true";
@@ -179,9 +198,11 @@ export async function GET(req: NextRequest) {
     const needPuppeteer =
       !action ||
       fields.length < 3 ||
-      !fields.some((f) => /(id|เลขประจำตัว)/i.test(f.label || "")) ||
       !fields.some((f) =>
-        /(ชื่อ[-\s]?นามสกุล|full\s*name)/i.test(f.label || "")
+        /(id|เลข\s*ประจำตัว|รหัส\s*นักศึกษา|student\s*id)/i.test(f.label || "")
+      ) ||
+      !fields.some((f) =>
+        /(ชื่อ[-\s]?นามสกุล|fullname|full\s*name)/i.test(f.label || "")
       ) ||
       !fields.some((f) => /(ชื่อเล่น|nickname)/i.test(f.label || ""));
 
@@ -203,22 +224,34 @@ export async function GET(req: NextRequest) {
         req2.continue();
       });
 
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
 
       await page
-        .waitForSelector('form[action*="formResponse"]', { timeout: 10000 })
+        .waitForSelector('form[action*="formResponse"]', { timeout: 12000 })
         .catch(() => {});
       await page
-        .waitForSelector('[name^="entry."]', { timeout: 5000 })
+        .waitForSelector(
+          'input[name^="entry."], textarea[name^="entry."], select[name^="entry."]',
+          { timeout: 12000 }
+        )
         .catch(() => {});
 
-      let formHtml = await page
-        .$eval('form[action*="formResponse"]', (el) => el.outerHTML)
-        .catch(() => "");
+      let formHtml =
+        (await page
+          .$eval('form[action*="formResponse"]', (el) => el.outerHTML)
+          .catch(() => "")) || "";
+
+      if (!formHtml) {
+        const fullHtml = await page.content();
+        formHtml = fullHtml;
+      }
+
       await page.close();
 
       if (formHtml) {
-        const wrapped = `<html><body>${formHtml}</body></html>`;
+        const wrapped = formHtml.includes("<html")
+          ? formHtml
+          : `<html><body>${formHtml}</body></html>`;
         $ = cheerio.load(wrapped);
         extracted = extractFromDom($);
         action = extracted.action || action;
